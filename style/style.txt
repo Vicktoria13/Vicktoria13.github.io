@@ -1,0 +1,202 @@
+import numpy as np
+import yaml
+import argparse
+import json
+import glob
+import matplotlib.pyplot as plt
+import cv2
+
+class RetrieveMask:
+    def __init__(self, config):
+        self.config = config
+        self.palette = self.get_annotations_categories()
+        self.image_mask = self.get_image_mask()
+        self.visualize(idx=2)
+        self.get_int_mask(1)
+    
+
+
+    def get_int_mask(self, idx):
+        """
+        Returns the mask as an int array.
+        The mask is an image RGB, we create mask_int from the mask RGB and the palette.
+        """
+        if idx >= len(self.image_mask):
+            print("Index out of range.")
+            return None
+        
+        _, mask_path = self.image_mask[idx]
+        
+        # Load mask
+        mask = cv2.imread(mask_path)
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB) #en RGB sinon la correspondance avec la palette ne marche pas
+
+        # Create mask_int from mask RGB and palette
+        mask_int = np.zeros(mask.shape[:2], dtype=np.int32)
+        for color, (id, name) in self.palette.items():
+            mask_int[(mask == color).all(axis=2)] = id
+
+        return mask_int
+    
+    def visualize(self,idx = 0):
+        """
+        Visualizes the image and its corresponding mask.
+        Mask is an Img RGB : create mask_int from the mask RGB and the palette.
+        """ 
+
+        if idx >= len(self.image_mask):
+            print("Index out of range.")
+            return
+        
+        image_path, mask_path = self.image_mask[idx]
+        
+        # Load image
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Load mask
+        mask = cv2.imread(mask_path)
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
+
+        # Create mask_int from mask RGB and palette
+        mask_int = np.zeros(mask.shape[:2], dtype=np.int32)
+        for color, (id, name) in self.palette.items():
+            mask_int[(mask == color).all(axis=2)] = id
+
+     
+        # Combine image and color mask
+        combined = cv2.addWeighted(image, 0.5, mask, 0.5, 0)
+        plt.figure(figsize=(10, 5))
+        plt.subplot(1, 2, 1)
+        plt.imshow(image)
+        plt.title("Image")
+        plt.subplot(1, 2, 2)
+        plt.imshow(combined)
+        plt.title("Image with Mask Overlay")
+
+        #sur chaque zone, écrire le nom de la catégorie : fais attention a ce qu'ils ne se chevauchent pas
+        for color, (id, name) in self.palette.items():
+            mask_area = (mask_int == id)
+            if np.any(mask_area):
+                y, x = np.mean(np.argwhere(mask_area), axis=0).astype(int)
+                plt.text(x, y, name, color='white', fontsize=12, ha='center', va='center')
+        plt.tight_layout()
+
+        #ecris les labels présents dans le mask
+        unique_labels = np.unique(mask_int)
+        names = [self.palette[color][1] for color in self.palette if self.palette[color][0] in unique_labels]
+        plt.suptitle(f"Labels: {', '.join(names)}")
+        plt.show()
+
+
+
+    def compute_mIoU(self, mask_int, ground_truth):
+        """
+        Computes the mean Intersection over Union (mIoU) between the predicted mask and the ground truth.
+        mask_int: predicted mask as an int array
+        ground_truth: ground truth mask as an int array
+        """
+
+        # Ensure both masks have the same shape
+        if mask_int.shape != ground_truth.shape:
+            raise ValueError("Masks must have the same shape")
+
+        # Get unique labels in both masks
+        unique_labels = np.unique(np.concatenate((mask_int, ground_truth)))
+
+        ious = []
+        for label in unique_labels:
+            # Create binary masks for the current label
+            pred_mask = (mask_int == label)
+            gt_mask = (ground_truth == label)
+
+            # Compute intersection and union
+            intersection = np.sum(pred_mask & gt_mask)
+            union = np.sum(pred_mask | gt_mask)
+
+            if union == 0:
+                iou = 0.0
+            else:
+                iou = intersection / union
+            ious.append(iou)
+        # Compute mean IoU
+        mIoU = np.mean(ious)
+        return mIoU
+    
+
+    
+
+
+
+
+    def get_annotations_categories(self):
+        #load json file
+        with open(self.config['ANNOTATIONS'], 'r') as file:
+            data = json.load(file)
+        
+        categories = data['categories'] #list
+        palette = {}
+
+        for category in categories:
+            id = category['id']
+            name = category['name']
+            color = tuple(category['color'])
+            palette[color] = (id, name)
+        
+        return palette
+    
+
+    def get_image_mask(self):
+        path_folder_mask = self.config['MASK']    #contains .png
+        path_folder_img = self.config['IMAGES_TV']   #contains .jpg
+
+        mask_files = sorted(glob.glob(f"{path_folder_mask}/*.png"))
+        image_files = sorted(glob.glob(f"{path_folder_img}/*.jpg"))
+        
+        pair_images = []
+
+
+        """
+        mask_files and image_files does not have the same length. len(img_files) > len(mask_files).
+        We need to select the path in image_files that corresponds to the mask_files.
+ same image.
+        """
+
+        for mask_file in mask_files:
+            mask_name = mask_file.split('/')[-1].split('.')[0]
+            if "error" in mask_name:
+                continue
+
+            #now, look for the corresponding image file without doing another for loop
+            corresponding_image_file = None
+            for image_file in image_files:
+                if mask_name in image_file:
+                    corresponding_image_file = image_file
+                    break
+            if corresponding_image_file is None:
+                continue
+            pair_images.append((corresponding_image_file, mask_file))
+
+        return pair_images
+    
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process some integers.")
+    parser.add_argument('--config', type=str, default='config.yaml',
+                        help='Path to the configuration file')
+    return parser.parse_args()
+
+def load_config(config_path):
+    with open(config_path, 'r') as file:
+        config = yaml.safe_load(file)
+    return config
+
+def main():
+    args = parse_args()
+    config = load_config(args.config)
+    
+    retriever = RetrieveMask(config)
+
+
+if __name__ == "__main__":
+    main()
+
